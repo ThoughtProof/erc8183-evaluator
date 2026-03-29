@@ -1,430 +1,369 @@
 """
-ThoughtProof Hook Integration for BNBAgent SDK.
+ThoughtProof verification hook for BNBAgent APEX protocol.
 
-This module provides automatic ThoughtProof verification integration that triggers
-when jobs are submitted via the APEX afterAction hook mechanism.
+Automatically verifies agent work when jobs are submitted.
+Plugs into the APEX job lifecycle as a post-submission hook.
 
-The hook monitors job submissions and automatically:
-1. Extracts the deliverable content from IPFS/storage
-2. Constructs a verification claim 
-3. Calls ThoughtProof API for verification
-4. Stores the result on-chain via ThoughtProofEvaluator contract
-5. Optionally finalizes the job automatically
+Usage:
+    from sdk.thoughtproof_evaluator import ThoughtProofEvaluatorClient
+    from sdk.thoughtproof_hook import ThoughtProofVerificationHook
 
-This enables seamless integration of ThoughtProof verification into the
-APEX job lifecycle without requiring manual intervention.
+    evaluator = ThoughtProofEvaluatorClient(web3=w3, ...)
+    hook = ThoughtProofVerificationHook(evaluator=evaluator)
+
+    # Manual trigger
+    result = hook.on_job_submitted(job_contract="0x...", job_id=42)
+
+    # Or integrate with APEX server routes
+    hook.register_routes(app)
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import json
-from typing import Any, Dict, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
-from .thoughtproof_evaluator import ThoughtProofEvaluatorClient, PaymentRequired
+from web3 import Web3
+
+from .thoughtproof_evaluator import (
+    ThoughtProofEvaluatorClient,
+    ThoughtProofAPIResponse,
+    call_thoughtproof_api,
+)
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass  
-class ThoughtProofConfig:
-    """Configuration for ThoughtProof hook integration."""
-    
-    # ThoughtProof API settings
-    verification_speed: str = "standard"  # standard, deep
-    verification_domain: str = "general"  # general, financial, medical, legal, code
-    api_timeout: float = 120.0
-    
-    # Automatic finalization settings
-    auto_finalize: bool = True
-    min_confidence_threshold: float = 0.7
-    auto_finalize_delay: float = 30.0  # seconds to wait before auto-finalize
-    
-    # Claim construction settings
-    include_job_context: bool = True
-    include_negotiation_history: bool = False
-    custom_claim_template: Optional[str] = None
-    
+@dataclass
+class HookConfig:
+    """Configuration for the verification hook."""
+
+    # Verification settings
+    speed: str = "standard"              # "fast", "standard", "deep"
+    domain: str = "general"              # "general", "financial", "medical", "legal", "code"
+    two_phase: bool = True               # Store first, finalize later (safer)
+    auto_finalize: bool = True           # Auto-finalize after store (if two_phase=True)
+    auto_finalize_delay: int = 0         # Seconds to wait before auto-finalize
+
+    # Claim construction
+    include_job_description: bool = True  # Include job description in claim
+    include_deliverable: bool = True      # Include deliverable content in claim
+    max_claim_length: int = 4000          # Truncate claims longer than this
+
     # Error handling
-    max_retries: int = 3
-    retry_delay: float = 5.0
-    fallback_on_api_error: bool = False  # If True, allows job through on API errors
+    fail_open: bool = False              # If True, don't block job on verification failure
+    max_retries: int = 2                 # API call retries
+    retry_delay: float = 2.0            # Base retry delay
 
 
-class ThoughtProofHook:
+@dataclass
+class VerificationEvent:
+    """Result of a hook verification."""
+
+    job_contract: str
+    job_id: int
+    success: bool
+    api_result: Optional[ThoughtProofAPIResponse] = None
+    tx_hash: Optional[str] = None
+    error: Optional[str] = None
+    two_phase: bool = False
+    finalized: bool = False
+
+
+class ThoughtProofVerificationHook:
     """
-    Hook integration for automatic ThoughtProof verification on job submission.
-    
-    This class integrates with the APEX job lifecycle to provide automatic
-    verification of submitted deliverables using the ThoughtProof API.
-    
-    Usage:
-        hook = ThoughtProofHook(evaluator_client, config)
-        
-        # Register with APEX job operations
-        job_ops.add_submission_hook(hook.on_job_submitted)
-        
-    Or use the convenience function:
-        register_thoughtproof_hook(job_ops, evaluator_client, config)
+    Verification hook that auto-evaluates APEX job submissions.
+
+    Designed to be triggered when an agent submits work on an ERC-8183 job.
+    The hook:
+      1. Fetches job details (description + deliverable)
+      2. Constructs a verification claim
+      3. Calls ThoughtProof API for multi-model verification
+      4. Signs and submits the result on-chain
+      5. Optionally finalizes (calls complete/reject on job contract)
     """
-    
+
     def __init__(
-        self, 
-        evaluator_client: ThoughtProofEvaluatorClient,
-        config: ThoughtProofConfig,
-        storage_provider=None
+        self,
+        evaluator: ThoughtProofEvaluatorClient,
+        config: HookConfig | None = None,
     ):
-        self.evaluator = evaluator_client
-        self.config = config
-        self.storage = storage_provider
-        self._pending_finalizations: dict[int, asyncio.Task] = {}
-        
-    async def on_job_submitted(self, job_id: int, job_data: dict) -> Dict[str, Any]:
-        """
-        Hook callback triggered when a job is submitted.
-        
-        This method:
-        1. Extracts deliverable content from the job
-        2. Constructs a verification claim
-        3. Calls ThoughtProof API and stores result
-        4. Schedules automatic finalization if configured
-        
-        Args:
-            job_id: The APEX job ID that was submitted
-            job_data: Job details from the APEX contract
-            
-        Returns:
-            Dict with verification results and status
-        """
-        logger.info(f"ThoughtProof hook triggered for job {job_id}")
-        
-        try:
-            # Extract deliverable content
-            claim = await self._build_verification_claim(job_id, job_data)
-            
-            # Perform verification and store result
-            verification_result = await self._verify_and_store(job_id, claim)
-            
-            # Schedule automatic finalization if configured
-            if self.config.auto_finalize:
-                await self._schedule_auto_finalization(job_id, verification_result)
-                
-            return {
-                "success": True,
-                "job_id": job_id,
-                "verification_stored": True,
-                "auto_finalize_scheduled": self.config.auto_finalize,
-                "thoughtproof_result": verification_result.get("thoughtproof_result"),
-                "transaction_hash": verification_result.get("transactionHash"),
-            }
-            
-        except PaymentRequired as e:
-            logger.error(f"ThoughtProof payment required for job {job_id}: {e}")
-            return await self._handle_payment_required(job_id, e)
-            
-        except Exception as e:
-            logger.error(f"ThoughtProof verification failed for job {job_id}: {e}")
-            return await self._handle_verification_error(job_id, e)
+        self.evaluator = evaluator
+        self.config = config or HookConfig()
+        self._pending_finalizations: list[tuple[str, int]] = []
 
-    async def _build_verification_claim(self, job_id: int, job_data: dict) -> str:
+    def on_job_submitted(
+        self,
+        job_contract: str,
+        job_id: int,
+        description: str = "",
+        deliverable: str = "",
+        metadata: dict | None = None,
+    ) -> VerificationEvent:
         """
-        Build the claim text for ThoughtProof verification.
-        
+        Called when an agent submits work on a job.
+
         Args:
+            job_contract: ERC-8183 job contract address
             job_id: The job ID
-            job_data: Job details from contract
-            
-        Returns:
-            Formatted claim string for verification
-        """
-        if self.config.custom_claim_template:
-            # Use custom template
-            return self.config.custom_claim_template.format(
-                job_id=job_id,
-                job=job_data,
-                description=job_data.get("description", ""),
-                deliverable=await self._get_deliverable_content(job_data),
-                **job_data
-            )
-        
-        # Get deliverable content
-        deliverable_content = await self._get_deliverable_content(job_data)
-        
-        # Build standard claim format
-        claim_parts = [
-            f"Job #{job_id} deliverable evaluation:",
-            f"Task: {job_data.get('description', 'Unknown task')}",
-            f"Deliverable: {deliverable_content}",
-            "Question: Is this deliverable a sound, complete, and appropriate response to the task?"
-        ]
-        
-        # Add job context if configured
-        if self.config.include_job_context:
-            claim_parts.extend([
-                f"Budget: {job_data.get('budget', 'Unknown')}",
-                f"Client: {job_data.get('client', 'Unknown')}",
-                f"Provider: {job_data.get('provider', 'Unknown')}",
-            ])
-            
-        return "\n".join(claim_parts)
+            description: Job task description
+            deliverable: The agent's submitted work/response
+            metadata: Optional additional context
 
-    async def _get_deliverable_content(self, job_data: dict) -> str:
-        """
-        Extract the actual deliverable content from storage.
-        
-        Args:
-            job_data: Job details including deliverable hash
-            
         Returns:
-            String content of the deliverable
+            VerificationEvent with result details
         """
-        deliverable_hash = job_data.get("deliverable", b"")
-        
-        if not deliverable_hash or deliverable_hash == b"\x00" * 32:
-            return "No deliverable provided"
-            
-        # Try to get content from storage if storage provider available
-        if self.storage:
-            try:
-                # Convert hash to storage key/URL
-                if isinstance(deliverable_hash, bytes):
-                    storage_key = deliverable_hash.hex()
-                else:
-                    storage_key = str(deliverable_hash)
-                    
-                content = await self.storage.download(storage_key)
-                
-                # If content is JSON, extract the response field
-                try:
-                    if isinstance(content, str):
-                        data = json.loads(content)
-                        if isinstance(data, dict) and "response" in data:
-                            return data["response"]
-                        elif isinstance(data, dict) and "deliverable" in data:
-                            return data["deliverable"]
-                        else:
-                            return content
-                    return str(content)
-                except json.JSONDecodeError:
-                    return content
-                    
-            except Exception as e:
-                logger.warning(f"Failed to fetch deliverable content from storage: {e}")
-                
-        # Fallback: use hash as identifier
-        if isinstance(deliverable_hash, bytes):
-            return f"Deliverable hash: 0x{deliverable_hash.hex()}"
-        else:
-            return f"Deliverable: {deliverable_hash}"
+        job_contract = Web3.to_checksum_address(job_contract)
 
-    async def _verify_and_store(self, job_id: int, claim: str) -> dict[str, Any]:
-        """
-        Call ThoughtProof API and store verification result.
-        
-        Args:
-            job_id: The job ID
-            claim: The claim to verify
-            
-        Returns:
-            Transaction result from storing verification
-        """
-        for attempt in range(self.config.max_retries):
+        logger.info(f"[ThoughtProof Hook] Verifying job {job_id} on {job_contract}")
+
+        # 1. Construct verification claim
+        claim = self._build_claim(job_id, description, deliverable, metadata)
+
+        # 2. Call ThoughtProof API with retry
+        api_result = None
+        last_error = None
+
+        for attempt in range(self.config.max_retries + 1):
             try:
-                # Call evaluator to verify and store
-                result = await asyncio.to_thread(
-                    self.evaluator.store_verification,
-                    job_id,
-                    claim,
-                    self.config.verification_speed,
-                    self.config.verification_domain
+                api_result = call_thoughtproof_api(
+                    claim=claim,
+                    speed=self.config.speed,
+                    domain=self.config.domain,
+                    api_url=self.evaluator._api_url,
                 )
-                
-                logger.info(f"ThoughtProof verification stored for job {job_id}")
-                return result
-                
-            except PaymentRequired:
-                # Don't retry payment errors
-                raise
-                
+                break
             except Exception as e:
-                logger.warning(f"Verification attempt {attempt + 1} failed for job {job_id}: {e}")
-                
-                if attempt < self.config.max_retries - 1:
-                    await asyncio.sleep(self.config.retry_delay)
-                else:
-                    raise
+                last_error = e
+                if attempt < self.config.max_retries:
+                    import time
+                    delay = self.config.retry_delay * (2 ** attempt)
+                    logger.warning(
+                        f"[ThoughtProof Hook] API call failed (attempt {attempt + 1}), "
+                        f"retrying in {delay:.1f}s: {e}"
+                    )
+                    time.sleep(delay)
 
-    async def _schedule_auto_finalization(self, job_id: int, verification_result: dict) -> None:
-        """
-        Schedule automatic finalization of the job after delay.
-        
-        Args:
-            job_id: The job ID
-            verification_result: Result from verification storage
-        """
-        # Cancel any existing finalization task for this job
-        if job_id in self._pending_finalizations:
-            self._pending_finalizations[job_id].cancel()
-            
-        # Create finalization task
-        task = asyncio.create_task(self._auto_finalize_job(job_id, verification_result))
-        self._pending_finalizations[job_id] = task
-        
-        logger.info(f"Scheduled auto-finalization for job {job_id} in {self.config.auto_finalize_delay}s")
+        if api_result is None:
+            error_msg = f"ThoughtProof API failed after {self.config.max_retries + 1} attempts: {last_error}"
+            logger.error(f"[ThoughtProof Hook] {error_msg}")
 
-    async def _auto_finalize_job(self, job_id: int, verification_result: dict) -> None:
-        """
-        Automatically finalize a job after the configured delay.
-        
-        Args:
-            job_id: The job ID  
-            verification_result: Result from verification storage
-        """
-        try:
-            # Wait for the configured delay
-            await asyncio.sleep(self.config.auto_finalize_delay)
-            
-            # Check if job should be finalized based on confidence threshold
-            thoughtproof_result = verification_result.get("thoughtproof_result", {})
-            confidence = thoughtproof_result.get("confidence", 0.0)
-            passed = thoughtproof_result.get("passed", False)
-            
-            if passed and confidence >= self.config.min_confidence_threshold:
-                # Finalize the job
-                finalize_result = await asyncio.to_thread(self.evaluator.finalize, job_id)
-                logger.info(f"Auto-finalized job {job_id}: {finalize_result.get('transactionHash')}")
+            if self.config.fail_open:
+                logger.warning("[ThoughtProof Hook] fail_open=True, skipping verification")
+                return VerificationEvent(
+                    job_contract=job_contract,
+                    job_id=job_id,
+                    success=False,
+                    error=error_msg,
+                )
             else:
-                logger.warning(
-                    f"Job {job_id} not auto-finalized: passed={passed}, "
-                    f"confidence={confidence:.2f}, threshold={self.config.min_confidence_threshold}"
+                return VerificationEvent(
+                    job_contract=job_contract,
+                    job_id=job_id,
+                    success=False,
+                    error=error_msg,
                 )
-                
+
+        # 3. Submit on-chain
+        try:
+            result = self.evaluator.verify_and_submit(
+                job_contract=job_contract,
+                job_id=job_id,
+                claim=claim,
+                speed=self.config.speed,
+                domain=self.config.domain,
+                two_phase=self.config.two_phase,
+            )
+
+            event = VerificationEvent(
+                job_contract=job_contract,
+                job_id=job_id,
+                success=True,
+                api_result=api_result,
+                tx_hash=result.get("tx_hash"),
+                two_phase=self.config.two_phase,
+                finalized=not self.config.two_phase,
+            )
+
+            # 4. Auto-finalize if configured
+            if self.config.two_phase and self.config.auto_finalize:
+                if self.config.auto_finalize_delay > 0:
+                    # Queue for later finalization
+                    self._pending_finalizations.append((job_contract, job_id))
+                    logger.info(
+                        f"[ThoughtProof Hook] Queued finalization for job {job_id} "
+                        f"(delay={self.config.auto_finalize_delay}s)"
+                    )
+                else:
+                    try:
+                        fin_result = self.evaluator.finalize(job_contract, job_id)
+                        event.finalized = True
+                        logger.info(
+                            f"[ThoughtProof Hook] Finalized job {job_id}: "
+                            f"tx={fin_result.get('transactionHash', 'N/A')}"
+                        )
+                    except Exception as e:
+                        logger.error(f"[ThoughtProof Hook] Finalization failed: {e}")
+
+            return event
+
         except Exception as e:
-            logger.error(f"Auto-finalization failed for job {job_id}: {e}")
-        finally:
-            # Clean up the task
-            self._pending_finalizations.pop(job_id, None)
+            error_msg = f"On-chain submission failed: {e}"
+            logger.error(f"[ThoughtProof Hook] {error_msg}")
+            return VerificationEvent(
+                job_contract=job_contract,
+                job_id=job_id,
+                success=False,
+                api_result=api_result,
+                error=error_msg,
+            )
 
-    async def _handle_payment_required(self, job_id: int, payment_error: PaymentRequired) -> dict[str, Any]:
-        """
-        Handle x402 payment required error.
-        
-        Args:
-            job_id: The job ID
-            payment_error: The payment required exception
-            
-        Returns:
-            Error response dict
-        """
-        payment_info = payment_error.payment_info
-        
-        return {
-            "success": False,
-            "job_id": job_id,
-            "error": "payment_required",
-            "error_message": str(payment_error),
-            "payment_info": payment_info,
-            "requires_manual_intervention": True,
-        }
+    def finalize_pending(self) -> list[VerificationEvent]:
+        """Finalize all pending two-phase verifications."""
+        results = []
+        remaining = []
 
-    async def _handle_verification_error(self, job_id: int, error: Exception) -> dict[str, Any]:
-        """
-        Handle verification API errors.
-        
-        Args:
-            job_id: The job ID
-            error: The error that occurred
-            
-        Returns:
-            Error response dict
-        """
-        if self.config.fallback_on_api_error:
-            logger.warning(f"Allowing job {job_id} through due to API error (fallback enabled): {error}")
-            return {
-                "success": True,
-                "job_id": job_id,
-                "verification_stored": False,
-                "fallback_used": True,
-                "error_message": str(error),
-                "requires_manual_intervention": True,
-            }
-        else:
-            return {
-                "success": False,
-                "job_id": job_id,
-                "error": "verification_failed",
-                "error_message": str(error),
-                "requires_manual_intervention": True,
-            }
+        for job_contract, job_id in self._pending_finalizations:
+            try:
+                self.evaluator.finalize(job_contract, job_id)
+                results.append(VerificationEvent(
+                    job_contract=job_contract,
+                    job_id=job_id,
+                    success=True,
+                    finalized=True,
+                ))
+            except Exception as e:
+                logger.error(f"[ThoughtProof Hook] Failed to finalize {job_id}: {e}")
+                remaining.append((job_contract, job_id))
+                results.append(VerificationEvent(
+                    job_contract=job_contract,
+                    job_id=job_id,
+                    success=False,
+                    error=str(e),
+                ))
 
-    def cancel_pending_finalization(self, job_id: int) -> bool:
-        """
-        Cancel pending auto-finalization for a job.
-        
-        Args:
-            job_id: The job ID
-            
-        Returns:
-            True if cancellation was successful, False if no pending finalization
-        """
-        if job_id in self._pending_finalizations:
-            self._pending_finalizations[job_id].cancel()
-            del self._pending_finalizations[job_id]
-            logger.info(f"Cancelled pending finalization for job {job_id}")
-            return True
-        return False
+        self._pending_finalizations = remaining
+        return results
 
-    async def manual_finalize(self, job_id: int) -> dict[str, Any]:
-        """
-        Manually finalize a job (bypasses auto-finalization logic).
-        
-        Args:
-            job_id: The job ID
-            
-        Returns:
-            Finalization result
-        """
-        # Cancel any pending auto-finalization
-        self.cancel_pending_finalization(job_id)
-        
-        # Finalize immediately
-        result = await asyncio.to_thread(self.evaluator.finalize, job_id)
-        logger.info(f"Manually finalized job {job_id}: {result.get('transactionHash')}")
-        return result
+    def _build_claim(
+        self,
+        job_id: int,
+        description: str,
+        deliverable: str,
+        metadata: dict | None,
+    ) -> str:
+        """Construct a verification claim from job data."""
+        parts = [f"ERC-8183 Job #{job_id} — Agent Deliverable Verification"]
 
+        if description and self.config.include_job_description:
+            parts.append(f"\nTask Description:\n{description}")
 
-def register_thoughtproof_hook(
-    job_ops,
-    evaluator_client: ThoughtProofEvaluatorClient,
-    config: Optional[ThoughtProofConfig] = None,
-    storage_provider=None
-) -> ThoughtProofHook:
-    """
-    Convenience function to register ThoughtProof hook with APEX job operations.
-    
-    Args:
-        job_ops: APEXJobOps instance
-        evaluator_client: ThoughtProofEvaluatorClient instance
-        config: Optional configuration (uses defaults if not provided)
-        storage_provider: Optional storage provider for deliverable content
-        
-    Returns:
-        ThoughtProofHook instance
-    """
-    if config is None:
-        config = ThoughtProofConfig()
-        
-    hook = ThoughtProofHook(evaluator_client, config, storage_provider)
-    
-    # Register the hook with job operations
-    # Note: This assumes APEXJobOps has a method to register submission hooks
-    # The actual integration point may vary depending on the SDK implementation
-    if hasattr(job_ops, 'add_submission_hook'):
-        job_ops.add_submission_hook(hook.on_job_submitted)
-    else:
-        logger.warning("APEXJobOps does not support submission hooks - manual integration required")
-    
-    logger.info("ThoughtProof hook registered with APEX job operations")
-    return hook
+        if deliverable and self.config.include_deliverable:
+            parts.append(f"\nAgent Deliverable:\n{deliverable}")
+
+        if metadata:
+            parts.append(f"\nContext: {metadata}")
+
+        parts.append(
+            "\nQuestion: Does the agent's deliverable adequately and correctly "
+            "fulfill the task requirements? Is the reasoning sound?"
+        )
+
+        claim = "\n".join(parts)
+
+        # Truncate if needed
+        if len(claim) > self.config.max_claim_length:
+            claim = claim[: self.config.max_claim_length - 50] + "\n\n[TRUNCATED]"
+
+        return claim
+
+    # ── FastAPI Route Integration ──
+
+    def register_routes(self, app: Any) -> None:
+        """
+        Register ThoughtProof verification routes on a FastAPI app.
+
+        Adds:
+          POST /thoughtproof/verify     — Manually trigger verification
+          GET  /thoughtproof/status     — Get verification status for a job
+          POST /thoughtproof/finalize   — Finalize a pending verification
+          GET  /thoughtproof/stats      — Get evaluator statistics
+        """
+        try:
+            from fastapi import FastAPI
+            from fastapi.responses import JSONResponse
+        except ImportError:
+            logger.warning("[ThoughtProof Hook] FastAPI not installed, skipping route registration")
+            return
+
+        @app.post("/thoughtproof/verify")
+        async def verify_job(payload: dict) -> JSONResponse:
+            job_contract = payload.get("job_contract", "")
+            job_id = int(payload.get("job_id", 0))
+            description = payload.get("description", "")
+            deliverable = payload.get("deliverable", "")
+
+            if not job_contract or not job_id:
+                return JSONResponse(
+                    {"error": "job_contract and job_id required"}, status_code=400,
+                )
+
+            event = self.on_job_submitted(
+                job_contract=job_contract,
+                job_id=job_id,
+                description=description,
+                deliverable=deliverable,
+            )
+
+            return JSONResponse({
+                "success": event.success,
+                "passed": event.api_result.passed if event.api_result else None,
+                "confidence": event.api_result.confidence if event.api_result else None,
+                "tx_hash": event.tx_hash,
+                "finalized": event.finalized,
+                "error": event.error,
+            }, status_code=200 if event.success else 500)
+
+        @app.get("/thoughtproof/status")
+        async def verification_status(job_contract: str, job_id: int) -> JSONResponse:
+            try:
+                result = self.evaluator.get_verification(job_contract, job_id)
+                return JSONResponse({
+                    "verified": result.timestamp > 0,
+                    "confidence": result.confidence,
+                    "passed": result.passed,
+                    "threshold": result.threshold,
+                    "finalized": result.finalized,
+                    "job_call_succeeded": result.job_call_succeeded,
+                    "timestamp": result.timestamp,
+                })
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        @app.post("/thoughtproof/finalize")
+        async def finalize_job(payload: dict) -> JSONResponse:
+            job_contract = payload.get("job_contract", "")
+            job_id = int(payload.get("job_id", 0))
+
+            try:
+                result = self.evaluator.finalize(job_contract, job_id)
+                return JSONResponse({
+                    "success": True,
+                    "tx_hash": result.get("transactionHash"),
+                })
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        @app.get("/thoughtproof/stats")
+        async def evaluator_stats() -> JSONResponse:
+            try:
+                stats = self.evaluator.get_stats()
+                stats["default_threshold"] = self.evaluator.get_default_threshold()
+                stats["min_verifiers"] = self.evaluator.get_min_verifiers()
+                stats["reputation_enabled"] = self.evaluator.reputation_enabled()
+                return JSONResponse(stats)
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        logger.info("[ThoughtProof Hook] Registered routes: /thoughtproof/{verify,status,finalize,stats}")

@@ -508,6 +508,7 @@ contract ThoughtProofEvaluator {
         address _verifierSigner
     ) external onlyOwner {
         if (_defaultThreshold < 100 || _defaultThreshold > 1000) revert InvalidThreshold();
+        if (_minVerifiers < 2) revert InvalidParameters();
         
         defaultThreshold = _defaultThreshold;
         minVerifiers = _minVerifiers;
