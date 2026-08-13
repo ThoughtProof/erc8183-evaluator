@@ -43,3 +43,25 @@ ERC-8183 contribution work (forum, hooks, evaluator composition discussion) cont
 ## Correction posture
 
 If you are doing independent on-chain diligence: thank you. Prefer this file + on-chain evidence over archived social/forum posts from March 2026. Forum posts are historical and may overstate operational maturity relative to later product focus.
+
+## Explorer links (Base)
+
+| Address | Basescan | Blockscout |
+|---|---|---|
+| `0x119299F33f918808edD5ef92bd79cefB8700C091` | [basescan](https://basescan.org/address/0x119299F33f918808edD5ef92bd79cefB8700C091) | [blockscout](https://base.blockscout.com/address/0x119299F33f918808edD5ef92bd79cefB8700C091) |
+| `0xf6aa6225fbff02455d51b287a33cc86c75897948` | [basescan](https://basescan.org/address/0xf6aa6225fbff02455d51b287a33cc86c75897948) | [blockscout](https://base.blockscout.com/address/0xf6aa6225fbff02455d51b287a33cc86c75897948) |
+
+## Claim correction log
+
+### 2026-08-13 — public claim hygiene
+
+| Previously easy to misread | Correct reading |
+|---|---|
+| README “production-ready” evaluator | **Historical / experimental** source + deploys; not a current production settlement product |
+| Mainnet addresses listed without usage caveat | **Deploy references only** — verify bytecode and tx/log history yourself; no ongoing production settlement volume claimed through these contracts |
+| Source-tree label `v1.3.0` | Label for the **repository source tree**, not a warranty that every address always ran every documented feature |
+| Current ThoughtProof verification | Live **HTTP APIs** (Sentinel / check), separate from these March evaluator deploys |
+
+**Git trail:** PR [#1](https://github.com/ThoughtProof/erc8183-evaluator/pull/1) · merge `f488290` · pre-correction tip `18a25bd`.  
+**Do not rewrite history.** Corrections clarify; they do not erase March artifacts.
+
