@@ -1,12 +1,17 @@
 # ERC-8183 ThoughtProof Evaluator
 
-**Advanced multi-model reasoning verification for BNB Chain agents**
+> **Status: historical / experimental (updated 2026-08-13).**  
+> Read **[STATUS.md](./STATUS.md) first.** This repo is **not** ThoughtProof’s production verification product and does **not** claim ongoing mainnet settlement volume through the listed contracts.  
+> Live product surfaces: [sentinel.thoughtproof.ai](https://sentinel.thoughtproof.ai) · [api.thoughtproof.ai](https://api.thoughtproof.ai) · [thoughtproof.ai](https://www.thoughtproof.ai)
 
-[![Contract](https://img.shields.io/badge/Contract-v1.3.0-blue)](./ThoughtProofEvaluator.sol)
+**Early ERC-8183 evaluator experiment** — Solidity contract, Foundry tests, and a thin Python SDK sketch that can call ThoughtProof’s off-chain multi-model verification API and submit signed results on-chain.
+
+[![Status](https://img.shields.io/badge/Status-historical%20%2F%20experimental-orange)](./STATUS.md)
+[![Source label](https://img.shields.io/badge/Source_label-v1.3.0-lightgrey)](./ThoughtProofEvaluator.sol)
 [![License](https://img.shields.io/badge/License-MIT-green)](./LICENSE)
-[![BNB Chain](https://img.shields.io/badge/BNB_Chain-Compatible-yellow)](https://github.com/bnb-chain/bnbagent-sdk)
 
-A production-ready ERC-8183 evaluator that leverages ThoughtProof's multi-model verification pipeline for autonomous agent work validation. Features two-phase settlement, ERC-8004 reputation integration, signature-based security, and per-contract threshold configuration.
+**Source-tree design goals** (see Solidity + tests; verify on-chain before assuming a given deploy has every feature): two-phase settlement helpers, optional ERC-8004 reputation hooks, EIP-191 signatures with replay protection, per-contract thresholds.  
+**Do not treat badges, commit titles, or older forum posts as proof of production traffic.** Prefer RPC/explorer history. See also [`GAP_ANALYSIS.md`](./GAP_ANALYSIS.md).
 
 ## Architecture
 
@@ -30,7 +35,7 @@ A production-ready ERC-8183 evaluator that leverages ThoughtProof's multi-model 
               │                        │                        │
               ▼                        ▼                        ▼
     ┌─────────────────────────────────────────────────────────────────┐
-    │                ThoughtProofEvaluator v1.3.0                    │
+    │           ThoughtProofEvaluator (source-tree design)           │
     │                                                                 │
     │  Phase 1: storeVerification()     Phase 2: finalize()          │
     │  ├─ Verify signature              ├─ Check stored result        │
@@ -49,15 +54,19 @@ A production-ready ERC-8183 evaluator that leverages ThoughtProof's multi-model 
     └─────────────────┘                            └─────────────────┘
 ```
 
-## Key Features
+## Design features (source / tests)
 
-- **Two-Phase Settlement**: Store verification results first, finalize later for safer execution
-- **Multi-Model Verification**: Grok + Gemini + DeepSeek + Sonnet consensus pipeline
-- **EIP-191 Signatures**: Cryptographic verification with replay protection and cross-chain safety
-- **Per-Contract Thresholds**: Configure confidence thresholds by contract tier (NEGLIGIBLE to CRITICAL)
-- **ERC-8004 Integration**: Automatic reputation feedback for verified agents
-- **Permissionless Finalization**: Anyone can finalize stored verifications
-- **APEX Protocol Compatible**: Works seamlessly with BNBAgent SDK
+These describe the **intended contract/SDK design** in this tree — not a warranty that every deployed address ran them in production:
+
+- **Two-phase settlement helpers**: store verification results, then finalize
+- **Off-chain multi-model verification**: API-side consensus pipeline (models configurable over time)
+- **EIP-191 signatures**: cryptographic verification with replay protection and chain id binding
+- **Per-contract thresholds**: configure confidence thresholds by contract tier
+- **Optional ERC-8004 reputation hooks**: when a registry is configured and enabled
+- **Permissionless finalization path**: where implemented in source
+- **BNBAgent / APEX sketches**: experimental integration examples (testnet-oriented)
+
+For known source/test gaps during the v1.3.0 push, see [`GAP_ANALYSIS.md`](./GAP_ANALYSIS.md).
 
 ## Quick Start
 
@@ -390,18 +399,22 @@ assert recovered == verifierSigner
 - Used signatures are tracked in `usedSignatures` mapping
 - Prevents double-spending of verification results
 
-## Deployment Addresses
+## Deployment addresses (experimental — verify on-chain)
 
-### Mainnet
-- **Base**: `0xf6aa6225fbff02455d51b287a33cc86c75897948`
-- **Base Sepolia**: `0xed8628ca1d02d174b9b7ef1b98408712df0f1e22`
+> **Full honesty notes:** [`STATUS.md`](./STATUS.md). Addresses below are **deploy references**, not proof of production settlement traffic.
 
-### Testnet
-- **BSC Testnet**: `0x3464e64dD53bC093c53050cE5114062765e9F1b6`
+| Network | Address | Role |
+|---|---|---|
+| Base mainnet (early) | `0x119299F33f918808edD5ef92bd79cefB8700C091` | Early evaluator deploy (v1.1-era). Historical Magicians reference. |
+| Base mainnet (later) | `0xf6aa6225fbff02455d51b287a33cc86c75897948` | Deploy associated with this source tree’s v1.3.0 label. **Experimental.** |
+| Base Sepolia | `0xed8628ca1d02d174b9b7ef1b98408712df0f1e22` | Testnet |
+| BSC testnet | `0x3464e64dD53bC093c53050cE5114062765e9F1b6` | Testnet / APEX experiments |
 
-### Related Contracts
-- **ERC-8004 Registry**: `0x8004A818BFB912233c491871b3d84c89A494BD9e`
-- **ThoughtProof Agent**: #28388
+### Related identifiers (not “TP owns this registry”)
+- Example ERC-8004 registry address referenced in older docs: `0x8004A818BFB912233c491871b3d84c89A494BD9e` — **confirm canonicity and holdings yourself**; this repo does not claim exclusive or production reputation writes there.
+- ThoughtProof ERC-8004 agent id (historical reference): `#28388`
+
+**External diligence rule:** if logs/tx history are empty beyond deploy, do **not** describe the address as a live production evaluator.
 
 ## ThoughtProof Integration
 
@@ -476,22 +489,12 @@ hook.on_job_submitted(
 )
 ```
 
-## Trust Stack Integration
+## Related surfaces
 
-Part of a comprehensive trust infrastructure:
-
-1. **Intuition** (Identity): Know who the agent is
-2. **AgentProof** (Reputation): Track agent performance history  
-3. **ANP** (Negotiation): Agree on work terms
-4. **ThoughtProof** (Verification): Validate work quality ← *This repo*
-5. **ar.io** (Archive): Permanent storage of proofs
-
-## Related Repositories
-
-- [ThoughtProof/erc8183-evaluator](https://github.com/ThoughtProof/erc8183-evaluator) - This contract
-- [ThoughtProof/pot-sdk](https://github.com/ThoughtProof/pot-sdk) - Python SDK
-- [ThoughtProof/pot-api](https://github.com/ThoughtProof/pot-api) - Multi-model API
-- [bnb-chain/bnbagent-sdk](https://github.com/bnb-chain/bnbagent-sdk) - APEX protocol
+- **[STATUS.md](./STATUS.md)** — claim hygiene / what is and is not production
+- **[GAP_ANALYSIS.md](./GAP_ANALYSIS.md)** — source/test gap notes from the v1.3.0 push
+- Live verification today: [sentinel.thoughtproof.ai](https://sentinel.thoughtproof.ai), [api.thoughtproof.ai](https://api.thoughtproof.ai)
+- [bnb-chain/bnbagent-sdk](https://github.com/bnb-chain/bnbagent-sdk) — APEX protocol (external)
 
 ## License
 
