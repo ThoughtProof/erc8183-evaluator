@@ -48,9 +48,11 @@ __all__ = [
     "SPEED_TIERS",
 ]
 
-# Contract addresses
+# Experimental deploy references only — not a production traffic claim.
+# See STATUS.md / README deployment table. Prefer RPC verification.
 CONTRACTS = {
-    "base_mainnet": "0xf6aa6225fbff02455d51b287a33cc86c75897948",
+    "base_mainnet": "0xf6aa6225fbff02455d51b287a33cc86c75897948",  # experimental
+    "base_mainnet_early": "0x119299F33f918808edD5ef92bd79cefB8700C091",  # v1.1-era
     "base_sepolia": "0xed8628ca1d02d174b9b7ef1b98408712df0f1e22",
-    "bsc_testnet": "0x3464e64dD53bC093c53050cE5114062765e9F1b6",  # ERC-8183
+    "bsc_testnet": "0x3464e64dD53bC093c53050cE5114062765e9F1b6",
 }

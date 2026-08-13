@@ -1,5 +1,9 @@
 # ThoughtProofEvaluator v1.3.0 Gap Analysis
 
+> **Context (2026-08-13):** This file is retained as an **honesty artifact**. It documents mismatches that appeared during the March 2026 v1.3.0 push between source expectations/tests and earlier contract revisions.  
+> It is **not** marketing. For current public posture of this repo, see [`STATUS.md`](./STATUS.md).  
+> Later commits may have closed some gaps in *source*; always re-check the specific **deployed bytecode** and tx history before assuming a mainnet address implements a feature.
+
 Based on the analysis of the current contract (`ThoughtProofEvaluator.sol`) and the test suite (`ThoughtProofEvaluator.t.sol`), here are the features that need to be added to bring the contract to v1.3.0 as expected by the tests:
 
 ## Critical Missing Features
