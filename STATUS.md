@@ -17,7 +17,7 @@ Source and deploy artifacts for an **early ERC-8183 evaluator experiment** (Marc
 
 | Address | Chain | Notes (as of 2026-08-13) |
 |---|---|---|
-| `0x119299F33f918808edD5ef92bd79cefB8700C091` | Base mainnet | Early (v1.1-era) deploy. Contract code present. **No production settlement traffic claimed.** |
+| `0x119299F33f918808edD5ef92bd79cefB8700C091` | Base mainnet | Early (v1.1-era) deploy. Contract code present. **No production settlement traffic claimed.** Independent full-range log scan (deploy→head, 2026-08-13): **0 logs**. Bytecode is **pre-two-phase** (has single-phase `submitVerification`; lacks `storeVerification`/`finalize` and ERC-8004 reputation selectors). Do **not** read forum “v1.3.0 reputation integration” language as a description of *this* bytecode. |
 | `0xf6aa6225fbff02455d51b287a33cc86c75897948` | Base mainnet | Later deploy associated with the v1.3.0 source tree. Contract code present. **Treat as experimental; do not assume production usage.** |
 | `0xed8628ca1d02d174b9b7ef1b98408712df0f1e22` | Base Sepolia | Testnet deploy. |
 | `0x3464e64dD53bC093c53050cE5114062765e9F1b6` | BSC testnet | Testnet / APEX experiments. |
@@ -60,6 +60,7 @@ If you are doing independent on-chain diligence: thank you. Prefer this file + o
 | README “production-ready” evaluator | **Historical / experimental** source + deploys; not a current production settlement product |
 | Mainnet addresses listed without usage caveat | **Deploy references only** — verify bytecode and tx/log history yourself; no ongoing production settlement volume claimed through these contracts |
 | Source-tree label `v1.3.0` | Label for the **repository source tree**, not a warranty that every address always ran every documented feature |
+| Forum “v1.3.0 + ERC-8004 reputation” on `0x1192…` | **Inaccurate for that bytecode** — pre-two-phase / no reputation selectors (see deploy table + GAP_ANALYSIS) |
 | Current ThoughtProof verification | Live **HTTP APIs** (Sentinel / check), separate from these March evaluator deploys |
 
 **Git trail:** PR [#1](https://github.com/ThoughtProof/erc8183-evaluator/pull/1) · merge `f488290` · pre-correction tip `18a25bd`.  
